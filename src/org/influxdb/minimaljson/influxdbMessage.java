@@ -9,7 +9,7 @@ import com.eclipsesource.json.JsonObject;
 import com.eclipsesource.json.JsonValue;
 
 public class influxdbMessage {
-	public String influxDbName = "devDB";
+	public String influxDbName = "flumeDB";
 	public String influxSeriesName = "test";
 	public String[] influxDbColumns = {"time"};
 	public String influxdbUrl;

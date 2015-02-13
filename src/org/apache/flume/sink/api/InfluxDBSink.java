@@ -24,7 +24,6 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 	private String username = "root";
 	private String password = "root";
 	private String database = "flumetest";
-	private String eventDomainTree = "";
 	private Influxdb influxdb = null;
 	private String fieldsToExclude = ""; // specify list of keys to exclude when passing data to influxDB, separated by spaces
 	private String dataField = ""; // specify nested data dictionary's key here 
@@ -34,7 +33,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 	private Context context;
 	private String seriesName="";
 	private long txnEventMax=100;
-	private String timeUnit="m";
+	private String timeUnit="ms";
 	private SinkCounter sinkCounter;
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(InfluxDBSink.class);
@@ -47,7 +46,6 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		this.username = context.getString("username", this.username);
 		this.password = context.getString("password", this.password);
 		this.database = context.getString("database", this.database);
-		this.eventDomainTree = context.getString("eventDomainTree", this.eventDomainTree);
 		this.fieldsToExclude = context.getString("fieldsToExclude", fieldsToExclude);
 		this.txnEventMax = context.getLong("txnEventMax", this.txnEventMax);
 		this.dataField = context.getString("dataField", dataField);
@@ -135,8 +133,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 				Object[] pointData;
 
 				influxdbFlumeHandler influxHelper = new influxdbFlumeHandler(event,
-						this.eventDomainTree,fieldsToExclude,
-						dataField,timestampField,messageType,
+						fieldsToExclude,dataField,timestampField,messageType,
 						Boolean.valueOf(this.prependDataField));
 
 				influxdbMessage influxMessage = influxHelper.getInfluxMessage();

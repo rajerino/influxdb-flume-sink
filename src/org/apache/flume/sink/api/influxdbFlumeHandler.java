@@ -22,7 +22,7 @@ public class influxdbFlumeHandler {
 		this.prependDataField = prepend;
 	}
 	
-	public void init (Event event, String eventDomainTree) {
+	public void init (Event event) {
 		byte[] messageBytes = event.getBody();
 		String messageString = new String(messageBytes);
 		JsonObject eventMessage ;
@@ -75,7 +75,7 @@ public class influxdbFlumeHandler {
 		this.pointData = influxMessage.getInfluxDbPointVals();
 	}
 
-	public influxdbFlumeHandler(Event event, String eventDomainTree,
+	public influxdbFlumeHandler(Event event,
 			String fieldsToExclude, String dataField, String timestampField,String messageType, boolean prependOption) {
 
 		this.fieldsToExclude = fieldsToExclude.isEmpty() ? this.fieldsToExclude : fieldsToExclude.split(" ");
@@ -83,7 +83,7 @@ public class influxdbFlumeHandler {
 		this.dataField = dataField;
 		this.messageType = messageType;
 		setPrependOption(prependOption);
-		init(event, eventDomainTree);
+		init(event);
 		
 	}
 
