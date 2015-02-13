@@ -6,6 +6,7 @@ import java.net.ConnectException;
 import java.util.concurrent.TimeUnit;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.sink.AbstractSink;
+import org.apache.flume.Sink.Status;
 import org.apache.flume.Channel;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
@@ -20,6 +21,7 @@ import org.influxdb.minimaljson.influxdbMessage;
 
 public class InfluxDBSink extends AbstractSink implements Configurable {
 	private String host = "localhost";
+	private String hosts = "";
 	private int port = 8086;
 	private String username = "root";
 	private String password = "root";
@@ -42,6 +44,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		this.context = context;
 
 		this.host = context.getString("host", this.host);
+		this.hosts = context.getString("hosts", this.hosts);
 		this.port = context.getInteger("port", this.port);
 		this.username = context.getString("username", this.username);
 		this.password = context.getString("password", this.password);
@@ -55,7 +58,16 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		this.seriesName = context.getString("seriesName", this.seriesName);
 		this.timeUnit = context.getString("timeUnit", this.timeUnit);
 
-		LOGGER.info("Configured InfluxDB Sink to host {} .", this.host);
+		if (this.hosts.isEmpty()) {
+			LOGGER.info("Configured InfluxDB Sink to host {} .", this.host);
+		} else {
+			if (this.hosts.split(" ").length>1){
+				LOGGER.info("Configured InfluxDB Sink to cluster hosts {} .", this.hosts);
+			} else {
+				LOGGER.info("Configured InfluxDB Sink to host {} .", this.hosts);
+			}
+			
+		}
 		LOGGER.info("Configured InfluxDB Sink messageType to {} .", this.messageType.isEmpty() ? "default (JSON object)" : this.messageType);
 
 		if (sinkCounter == null) {
@@ -72,7 +84,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		// Initialize the connection to InfluxDB that
 		// this Sink will forward Events to ..
 		try {
-			this.influxdb = new Influxdb(this.host, this.port, this.database, this.username, this.password, this.timeUnit);
+			this.influxdb = new Influxdb(this.hosts.isEmpty() ? this.host : this.hosts, this.port, this.database, this.username, this.password, this.timeUnit);
 			sinkCounter.incrementConnectionCreatedCount();
 		} catch (Exception e) {
 			sinkCounter.incrementConnectionFailedCount();
@@ -110,7 +122,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 
 	@Override
 	public Status process() throws EventDeliveryException {
-		Status status = null;
+		Status status = Status.READY;
 
 		// Start transaction
 		Channel ch = getChannel();
@@ -124,32 +136,44 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 			int attempts = 0;
 			for (txnEventCount = 0; txnEventCount < txnEventMax; txnEventCount++) {
 				event = ch.take();
-				if (event == null) {
-					break;
-				}
+			 if (event != null) {
+				
 				attempts++;
 				
 				String[] pointColumns;
 				Object[] pointData;
-
-				influxdbFlumeHandler influxHelper = new influxdbFlumeHandler(event,
+				try {
+					influxdbFlumeHandler influxHelper = new influxdbFlumeHandler(event,
 						fieldsToExclude,dataField,timestampField,messageType,
 						Boolean.valueOf(this.prependDataField));
 
-				influxdbMessage influxMessage = influxHelper.getInfluxMessage();
-				influxMessage.setSeriesName(this.seriesName);
+					influxdbMessage influxMessage = influxHelper.getInfluxMessage();
+					influxMessage.setSeriesName(this.seriesName);
+				
+					pointColumns = influxMessage.getInfluxDbColumns();
+					pointData = influxMessage.getInfluxDbPointVals();
+					
+					String seriesName = influxMessage.getInfluxSeries();
+				
 
-				pointColumns = influxMessage.getInfluxDbColumns();
-				pointData = influxMessage.getInfluxDbPointVals();
-
-				String seriesName = influxMessage.getInfluxSeries();    	
-
-
-				this.influxdb.writePoints(database, seriesName, pointColumns, pointData);
-				LOGGER.info("Recorded to InfluxDB series \"{}\" in database \"{}\" ...", seriesName, this.database);
+					this.influxdb.writePoints(database, seriesName, pointColumns, pointData);
+					LOGGER.info("Recorded to InfluxDB series \"{}\" in database \"{}\" ...", seriesName, this.database);
+				} catch (Exception e) {
+					txn.rollback();
+					status=status.BACKOFF;
+					byte[] messageBytes = event.getBody();
+					String messageString = new String(messageBytes);
+					LOGGER.error("InfluxDB Sink " + getName() + " exception: Unsuccessful event handling from channel " + ch.getName()
+									+ ". Exception follows.", e);
+					throw e;
+				}
+				
 				sinkCounter.incrementConnectionCreatedCount();
+			} else {
+				LOGGER.error("NULL Flume event on " + ch.getName());
+				break;
 			}
-			
+		}
 			sinkCounter.addToEventDrainAttemptCount(attempts);
 			if (txnEventCount == 0) {
 				sinkCounter.incrementBatchEmptyCount();
@@ -159,17 +183,16 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 				sinkCounter.incrementBatchUnderflowCount();
 			}
 
-
-
 			txn.commit();
 			if (txnEventCount > 0) {
 				sinkCounter.addToEventDrainSuccessCount(txnEventCount);
 			}
-
+			
 			if(event == null) {
-				return Status.BACKOFF;
+				status = Status.BACKOFF;
 			}
-			return Status.READY;
+
+			return status;
 		}
 		
 		catch (IOException e){
