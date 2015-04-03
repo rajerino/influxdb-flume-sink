@@ -1,6 +1,7 @@
 package org.influxdb.minimaljson;
 
 
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
 
@@ -9,7 +10,7 @@ import com.eclipsesource.json.JsonObject;
 import com.eclipsesource.json.JsonValue;
 
 public class influxdbMessage {
-	public String influxDbName = "flumeDB";
+	public String influxDbName = "devDB";
 	public String influxSeriesName = "test";
 	public String[] influxDbColumns = {"time"};
 	public String influxdbUrl;
@@ -19,8 +20,28 @@ public class influxdbMessage {
 	public void setSeriesName(String seriesName){
 		this.influxSeriesName = seriesName.isEmpty() ? this.influxSeriesName : seriesName;
 	}
+
 	
-	public void initializeThis(Object object, Long pointTime) {
+	private void influxdbMessageConstructor(JsonObject influxEventData,
+			String timestampField) {
+		if (influxEventData.names().contains(timestampField)) {
+			Long time = influxEventData.get(timestampField).asLong();
+			influxEventData.remove(timestampField);
+			initializeThis(influxEventData,time);
+		} else if (influxEventData.names().contains("columns")) {
+			if (influxEventData.get("columns").asObject().names().contains(timestampField)){
+				Long time = influxEventData.get(timestampField).asLong();
+				initializeThis(influxEventData,time);
+			}
+			
+		} else {
+			System.out.println("Unable to locate timestamp field \"" + timestampField +".\" Using automatically generated timestamp from InfluxDB");
+			initializeThis(influxEventData,null);
+		}
+		
+	}
+
+	private void initializeThis(Object object, Long pointTime) {
 		JsonObject dataPoint = new JsonObject();
 		dataPoint = JsonObject.readFrom(object.toString());
 		Object[] influxDbPointVals = {"time"};
@@ -54,7 +75,6 @@ public class influxdbMessage {
 		JsonObject seriesWriteObject = new JsonObject().add("name", this.influxSeriesName);
 
 		String dbColumnsArray = Arrays.toString(this.influxDbColumns);
-
 		JsonArray dbColumnsJson = JsonArray.readFrom(dbColumnsArray);
 		seriesWriteObject.add("columns", dbColumnsJson);
 
@@ -76,18 +96,23 @@ public class influxdbMessage {
 		
 	}
 	
+	public influxdbMessage(JsonObject influxEventData, String timestampField,
+			String seriesName) {
+		this.setSeriesName(seriesName);
+		influxdbMessageConstructor(influxEventData, timestampField);
+	}
+
 	public influxdbMessage(JsonObject influxEventData, String timestampField) {
 		
-		if (influxEventData.names().contains(timestampField)) {
-			Long time = influxEventData.get(timestampField).asLong();
-			influxEventData.remove(timestampField);
-			initializeThis(influxEventData,time);
-		} else {
-			System.out.println("Unable to locate timestamp field \"" + timestampField +".\" Using automatically generated timestamp from InfluxDB");
-			initializeThis(influxEventData,null);
-		}
+		influxdbMessageConstructor(influxEventData,timestampField);
 			
 	}
+
+	public influxdbMessage() {
+		
+	}
+
+
 
 	public String[] getInfluxDbColumns() {
 
@@ -111,7 +136,15 @@ public class influxdbMessage {
 //					dataArray[i]=obj.asString().replace("\"", "");
 					dataArray[i]=obj.asString();
 				} else if (obj.isNumber()) {
-					dataArray[i]=obj.asDouble();
+					if (Math.abs((obj.asDouble()%1)) > 0 || (obj.toString().contains("."))){
+						dataArray[i] = obj.asFloat();
+					} else {
+						dataArray[i] = obj.asLong();
+					}
+					
+					
+				} else {
+					dataArray[i]=obj;
 				}
 				i++;
 			}
@@ -163,5 +196,18 @@ public class influxdbMessage {
 	public String getInfluxSeries() {
 		// TODO Auto-generated method stub
 		return this.influxSeriesName;
+	}
+
+	public void readFromSeriesWriteObject(JsonObject influxEventData) {
+		JsonArray columnNames=influxEventData.get("columns").asArray();
+		influxDbColumns = new String[columnNames.size()];
+		Integer i=0;
+		for(JsonValue dbCol : columnNames) {
+			influxDbColumns[i]="\""+dbCol+"\"";
+			i++;
+		}
+		this.jsonBody.add(influxEventData);
+		this.setSeriesName(influxEventData.get("name").asString());
+		
 	}
 }

@@ -3,10 +3,12 @@ package org.apache.flume.sink.api;
 
 import java.io.IOException;
 import java.net.ConnectException;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+
+import org.apache.flume.Sink.Status;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.sink.AbstractSink;
-import org.apache.flume.Sink.Status;
 import org.apache.flume.Channel;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
@@ -30,13 +32,14 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 	private String fieldsToExclude = ""; // specify list of keys to exclude when passing data to influxDB, separated by spaces
 	private String dataField = ""; // specify nested data dictionary's key here 
 	private String timestampField = ""; // field from which to read timestamp
-	private String prependDataField = "false";
+	private String prependColumnNames = "false";
 	private String messageType = ""; //defaults to JSON object
 	private Context context;
 	private String seriesName="";
 	private long txnEventMax=100;
 	private String timeUnit="ms";
 	private SinkCounter sinkCounter;
+	private influxdbFlumeHandler influxHelper;
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(InfluxDBSink.class);
 	@Override
@@ -49,15 +52,15 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		this.username = context.getString("username", this.username);
 		this.password = context.getString("password", this.password);
 		this.database = context.getString("database", this.database);
-		this.fieldsToExclude = context.getString("fieldsToExclude", fieldsToExclude);
+		this.fieldsToExclude = context.getString("fieldsToExclude", this.fieldsToExclude);
 		this.txnEventMax = context.getLong("txnEventMax", this.txnEventMax);
-		this.dataField = context.getString("dataField", dataField);
-		this.timestampField = context.getString("timestampField", timestampField);
-		this.prependDataField = context.getString("prependDataFieldNames", prependDataField);
+		this.dataField = context.getString("dataField", this.dataField);
+		this.timestampField = context.getString("timestampField", this.timestampField);
+		this.prependColumnNames = context.getString("prependColumnNames", this.prependColumnNames);
 		this.messageType = context.getString("messageType", this.messageType);
 		this.seriesName = context.getString("seriesName", this.seriesName);
 		this.timeUnit = context.getString("timeUnit", this.timeUnit);
-
+		
 		if (this.hosts.isEmpty()) {
 			LOGGER.info("Configured InfluxDB Sink to host {} .", this.host);
 		} else {
@@ -85,6 +88,9 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		// this Sink will forward Events to ..
 		try {
 			this.influxdb = new Influxdb(this.hosts.isEmpty() ? this.host : this.hosts, this.port, this.database, this.username, this.password, this.timeUnit);
+			this.influxHelper = new influxdbFlumeHandler(
+					fieldsToExclude,dataField,timestampField,messageType,seriesName,
+					Boolean.valueOf(this.prependColumnNames));
 			sinkCounter.incrementConnectionCreatedCount();
 		} catch (Exception e) {
 			sinkCounter.incrementConnectionFailedCount();
@@ -127,8 +133,10 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 		// Start transaction
 		Channel ch = getChannel();
 		Transaction txn = ch.getTransaction();
+		
 
 		txn.begin();
+
 
 		try {
 			Event event = null;
@@ -136,63 +144,67 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 			int attempts = 0;
 			for (txnEventCount = 0; txnEventCount < txnEventMax; txnEventCount++) {
 				event = ch.take();
-			 if (event != null) {
 				
-				attempts++;
-				
-				String[] pointColumns;
-				Object[] pointData;
-				try {
-					influxdbFlumeHandler influxHelper = new influxdbFlumeHandler(event,
-						fieldsToExclude,dataField,timestampField,messageType,
-						Boolean.valueOf(this.prependDataField));
+				if (event != null) {
 
-					influxdbMessage influxMessage = influxHelper.getInfluxMessage();
-					influxMessage.setSeriesName(this.seriesName);
-				
-					pointColumns = influxMessage.getInfluxDbColumns();
-					pointData = influxMessage.getInfluxDbPointVals();
+					attempts++;
+
+					String[] pointColumns;
+					Object[] pointData;
+					try {
+						
+						this.influxHelper.newEvent(event);
+						
+						List<influxdbMessage> influxMessages = this.influxHelper.getInfluxMessages();
+						
+						this.influxdb.writePoints(influxMessages);
+						
+						for (influxdbMessage influxMsg: influxMessages){
+							LOGGER.info("Recorded to InfluxDB series \"{}\" in database \"{}\" .", influxMsg.getInfluxSeries(), this.database);
+						}
+
+					} catch (Exception e){
+						txn.rollback();
+						status=status.BACKOFF;
+						byte[] eventBytes = event.getBody();
+						String eventString = new String(eventBytes);
+						
+						LOGGER.error("InfluxDB Sink " + getName() + ": Unable to process from channel " + ch.getName() +" event: \n\t\t\t" + eventString , e);
+						throw e;
+
+					}
+					sinkCounter.incrementConnectionCreatedCount();
+				} else {
 					
-					String seriesName = influxMessage.getInfluxSeries();
-				
 
-					this.influxdb.writePoints(database, seriesName, pointColumns, pointData);
-					LOGGER.info("Recorded to InfluxDB series \"{}\" in database \"{}\" ...", seriesName, this.database);
-				} catch (Exception e) {
-					txn.rollback();
-					status=status.BACKOFF;
-					byte[] messageBytes = event.getBody();
-					String messageString = new String(messageBytes);
-					LOGGER.error("InfluxDB Sink " + getName() + " exception: Unsuccessful event handling from channel " + ch.getName()
-									+ ". Exception follows.", e);
-					throw e;
+//					LOGGER.info("NULL Flume event on " + ch.getName());
+					break;
+
+				}
+			}
+				sinkCounter.addToEventDrainAttemptCount(attempts);
+				if (txnEventCount == 0) {
+					sinkCounter.incrementBatchEmptyCount();
+				} else if (txnEventCount == txnEventMax) {
+					sinkCounter.incrementBatchCompleteCount();
+				} else {
+					sinkCounter.incrementBatchUnderflowCount();
+				}
+
+
+
+				txn.commit();
+				if (txnEventCount > 0) {
+					sinkCounter.addToEventDrainSuccessCount(txnEventCount);
 				}
 				
-				sinkCounter.incrementConnectionCreatedCount();
-			} else {
-				LOGGER.error("NULL Flume event on " + ch.getName());
-				break;
-			}
-		}
-			sinkCounter.addToEventDrainAttemptCount(attempts);
-			if (txnEventCount == 0) {
-				sinkCounter.incrementBatchEmptyCount();
-			} else if (txnEventCount == txnEventMax) {
-				sinkCounter.incrementBatchCompleteCount();
-			} else {
-				sinkCounter.incrementBatchUnderflowCount();
-			}
+				if(event == null) {
+					status = Status.BACKOFF;
+				}
 
-			txn.commit();
-			if (txnEventCount > 0) {
-				sinkCounter.addToEventDrainSuccessCount(txnEventCount);
-			}
+				return status;
 			
-			if(event == null) {
-				status = Status.BACKOFF;
-			}
-
-			return status;
+			
 		}
 		
 		catch (IOException e){
@@ -201,7 +213,7 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 					+ ". Exception follows.", e);
 			// Log exception, handle individual exceptions as needed
 
-			//status = Status.BACKOFF;
+			status = Status.BACKOFF;
 
 			// re-throw all Errors
 			
@@ -213,12 +225,14 @@ public class InfluxDBSink extends AbstractSink implements Configurable {
 			txn.rollback();
 			LOGGER.error("InfluxDB Sink " + getName() + ": Exception while writing ", e);
 			e.printStackTrace();
-			return Status.BACKOFF;
+			status=Status.BACKOFF;
+			return status;
 
 		}
 		 finally {
 			txn.close();
 		}
+		
 	}
 //	return status;
 
